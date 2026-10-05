@@ -18,12 +18,11 @@
 //!   schedules its own drives and timers on the installed [`Host`]. This is
 //!   the shape the JavaScript glue builds.
 //!
-//! Wakes coalesce. A wake that arrives while a drive is running sets a flag
-//! and the drive schedules one follow-up at its end. A wake that arrives
-//! between drives schedules one drive; further wakes before it runs are
-//! absorbed. The follow-up after a batch that still has ready work is a
-//! macrotask, so a busy loop yields a host turn between batches instead of
-//! starving the host's I/O.
+//! A wake that arrives while a drive is running sets a flag and the drive
+//! schedules one follow-up at its end. Every wake between drives schedules
+//! its own drive, preserving the host context that woke it. The follow-up
+//! after a batch that still has ready work is a macrotask, so a busy loop
+//! yields a host turn between batches instead of starving the host's I/O.
 //!
 //! [`drive`]: LocalEventLoop::drive
 //! [`next_timer`]: LocalEventLoop::next_timer
@@ -67,8 +66,6 @@ struct Flags {
     in_drive: AtomicBool,
     /// A wake arrived during the drive; one follow-up is owed.
     woken: AtomicBool,
-    /// A microtask drive is scheduled and has not started yet.
-    pending: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -84,6 +81,8 @@ pub(crate) struct Shared {
     armed: Cell<bool>,
     held: Cell<bool>,
     tid: ThreadId,
+    #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+    network_dialer: std::cell::RefCell<Option<Arc<dyn crate::net::host::Dialer>>>,
 }
 
 impl std::fmt::Debug for dyn Host {
@@ -110,10 +109,8 @@ impl Wake for Hosted {
             self.flags.woken.store(true, Ordering::Release);
             return;
         }
-        if self.flags.pending.swap(true, Ordering::AcqRel) {
-            // A microtask drive is already on its way.
-            return;
-        }
+        // A pending drive belongs to the host context that scheduled it.
+        // Another external context must retain its own scheduled callback.
         self.host.schedule(self.id, Turn::Microtask);
     }
 }
@@ -143,6 +140,8 @@ impl LocalEventLoop {
             armed: Cell::new(false),
             held: Cell::new(false),
             tid: std::thread::current().id(),
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            network_dialer: std::cell::RefCell::new(None),
         });
         let waker = match waker {
             Some(waker) => waker,
@@ -178,6 +177,22 @@ impl LocalEventLoop {
     /// `Handle::enter`.
     pub fn handle(&self) -> &Handle {
         &self.shared.handle
+    }
+
+    cfg_host_net! {
+        /// Sets the network dialer used while this loop polls futures.
+        ///
+        /// Applies to `block_on` and every task polled by `drive`, including
+        /// tasks spawned with [`tokio::spawn`](crate::spawn). Existing sockets
+        /// retain their links. A change takes effect on the next drive or
+        /// `block_on` call. Entering the runtime with [`Handle::enter`] alone
+        /// does not select this dialer.
+        ///
+        /// Until this is called, networking uses the process default installed
+        /// with [`crate::net::host::install`].
+        pub fn set_network_dialer(&self, dialer: Arc<dyn crate::net::host::Dialer>) {
+            *self.shared.network_dialer.borrow_mut() = Some(dialer);
+        }
     }
 
     /// The id a hosted loop is registered under with the [`Host`]; `None`
@@ -264,7 +279,6 @@ impl Shared {
     /// calling back while a drive is on the stack) is folded into the drive
     /// on the stack instead of panicking.
     pub(crate) fn drive_from_host(&self) {
-        self.flags.pending.store(false, Ordering::Release);
         if self.flags.in_drive.load(Ordering::Acquire) {
             self.flags.woken.store(true, Ordering::Release);
             return;
@@ -274,12 +288,13 @@ impl Shared {
 
     fn drive(&self) {
         self.check_thread();
-        self.flags.pending.store(false, Ordering::Release);
         let Some(guard) = InDrive::enter(&self.flags) else {
             panic!("`LocalEventLoop::drive` called from inside a drive");
         };
         let scheduler = self.handle.inner.as_current_thread();
         let batch = context::enter_runtime(&self.handle.inner, false, |_| {
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            let _dialer = crate::net::host::enter_dialer(self.network_dialer.borrow().clone());
             self.runtime.current_thread().drive_batch(scheduler)
         });
         drop(guard);
@@ -300,6 +315,8 @@ impl Shared {
         };
         let scheduler = self.handle.inner.as_current_thread();
         let ret = context::enter_runtime(&self.handle.inner, false, |_| {
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            let _dialer = crate::net::host::enter_dialer(self.network_dialer.borrow().clone());
             self.runtime.current_thread().block_on_ready(scheduler, future)
         });
         drop(guard);

@@ -196,6 +196,7 @@ impl Link for MemLink {
 #[derive(Default)]
 struct MemDialer {
     links: Mutex<Vec<Arc<MemLink>>>,
+    lookups: Mutex<Vec<(String, u16)>>,
 }
 
 impl Dialer for MemDialer {
@@ -215,6 +216,7 @@ impl Dialer for MemDialer {
         Box::pin(async move { Ok(link as Arc<dyn Link>) })
     }
     fn resolve(&self, host: String, port: u16) -> ResolveFuture {
+        self.lookups.lock().unwrap().push((host.clone(), port));
         Box::pin(async move {
             if host == "example.test" {
                 Ok(vec![SocketAddr::new([93, 184, 216, 34].into(), port)])
@@ -405,4 +407,105 @@ fn the_types_are_send_and_sync() {
     assert_send_sync::<UdpSocket>();
     assert_send_sync::<tokio::net::host::OwnedReadHalf>();
     assert_send_sync::<tokio::net::host::OwnedWriteHalf>();
+}
+
+#[cfg(tokio_host_loop)]
+mod local_event_loop {
+    use super::*;
+    use tokio::runtime::host::{self, drive_registered, EventLoopId, Host, Turn};
+    use tokio::runtime::{Builder, LocalEventLoop, LocalOptions};
+
+    struct ManualHost;
+
+    impl Host for ManualHost {
+        fn schedule(&self, _: EventLoopId, _: Turn) {}
+        fn set_timer(&self, _: EventLoopId, _: std::time::Duration) {}
+        fn clear_timer(&self, _: EventLoopId) {}
+    }
+
+    fn hosted() -> LocalEventLoop {
+        static HOST: OnceLock<()> = OnceLock::new();
+        HOST.get_or_init(|| {
+            host::install(Arc::new(ManualHost)).ok().expect("first host installation");
+        });
+        Builder::new_current_thread()
+            .build_hosted_local_event_loop(LocalOptions::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn separate_loops_select_their_dialer_for_spawned_tasks() {
+        let first = hosted();
+        let second = hosted();
+        let first_dialer = Arc::new(MemDialer::default());
+        let second_dialer = Arc::new(MemDialer::default());
+        first.set_network_dialer(first_dialer.clone());
+        second.set_network_dialer(second_dialer.clone());
+
+        let mut pending = Vec::new();
+        for rt in [&first, &second] {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let task = rt.spawn_local(async move {
+                tokio::spawn(async move {
+                    receiver.await.unwrap();
+                    let tcp = TcpStream::connect_name("gateway.discord.gg", 443).await.unwrap();
+                    let udp = UdpSocket::bind("0.0.0.0:41000".parse::<SocketAddr>().unwrap()).await.unwrap();
+                    assert_eq!(resolve("example.test".into(), 443).await.unwrap(), vec!["93.184.216.34:443".parse().unwrap()]);
+                    (tcp, udp)
+                }).await.unwrap()
+            });
+            drive_registered(rt.id().unwrap());
+            pending.push((sender, task));
+        }
+        assert!(first_dialer.links.lock().unwrap().is_empty());
+        assert!(second_dialer.links.lock().unwrap().is_empty());
+        let (first_sender, first_task) = pending.remove(0);
+        let (second_sender, second_task) = pending.remove(0);
+        first_sender.send(()).unwrap();
+        second_sender.send(()).unwrap();
+        for _ in 0..10 {
+            drive_registered(second.id().unwrap());
+            drive_registered(first.id().unwrap());
+            if first_task.is_finished() && second_task.is_finished() {
+                break;
+            }
+        }
+        assert!(first_task.is_finished() && second_task.is_finished());
+        first.block_on(first_task).unwrap();
+        second.block_on(second_task).unwrap();
+        for dialer in [&first_dialer, &second_dialer] {
+            let links = dialer.links.lock().unwrap();
+            assert_eq!(links.len(), 2);
+            assert_eq!(*links[0].kind.lock().unwrap(), Some(Target::Name("gateway.discord.gg".into(), 443)));
+            assert_eq!(*links[1].local.lock().unwrap(), Some("0.0.0.0:41000".parse().unwrap()));
+            assert_eq!(*dialer.lookups.lock().unwrap(), vec![("example.test".into(), 443)]);
+        }
+    }
+
+    #[test]
+    fn block_on_selects_its_dialer_and_restores_the_default_after_panics() {
+        the_dialer();
+        let scoped = hosted();
+        let dialer = Arc::new(MemDialer::default());
+        scoped.set_network_dialer(dialer.clone());
+        scoped.block_on(async {
+            TcpStream::connect_name("scoped.test", 80).await.unwrap();
+        });
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scoped.block_on(async { panic!("test panic during block_on") });
+        }));
+        assert!(panicked.is_err());
+
+        // An ordinary runtime and a loop with no override use install().
+        Builder::new_current_thread().build().unwrap().block_on(async {
+            TcpStream::connect_name("default-after-panic.test", 80).await.unwrap();
+        });
+        let default = hosted();
+        default.block_on(async {
+            TcpStream::connect_name("default-loop.test", 80).await.unwrap();
+        });
+        assert_eq!(dialer.links.lock().unwrap().len(), 1);
+        link_for(Target::Name("default-after-panic.test".into(), 80));
+        link_for(Target::Name("default-loop.test".into(), 80));
+    }
 }

@@ -4,6 +4,7 @@
 #![warn(rust_2018_idioms)]
 #![cfg(all(feature = "full", tokio_unstable, tokio_host_loop))]
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,7 +16,7 @@ use tokio::runtime::{Builder, LocalEventLoop, LocalOptions};
 
 #[derive(Default)]
 struct State {
-    micro: VecDeque<EventLoopId>,
+    micro: VecDeque<(EventLoopId, usize)>,
     macro_: VecDeque<EventLoopId>,
     timers: HashMap<EventLoopId, Instant>,
     keepalive: HashMap<EventLoopId, bool>,
@@ -31,6 +32,7 @@ struct ManualHost;
 
 thread_local! {
     static STATE: Mutex<State> = Mutex::new(State::default());
+    static CONTEXT: Cell<usize> = const { Cell::new(0) };
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -41,7 +43,7 @@ impl Host for ManualHost {
     fn schedule(&self, id: EventLoopId, turn: Turn) {
         with_state(|s| match turn {
             Turn::Microtask => {
-                s.micro.push_back(id);
+                s.micro.push_back((id, CONTEXT.with(Cell::get)));
                 s.counts.entry(id).or_default().0 += 1;
             }
             Turn::Macrotask => {
@@ -84,8 +86,10 @@ impl ManualHost {
         loop {
             let next = with_state(|s| s.micro.pop_front());
             match next {
-                Some(id) => {
+                Some((id, context)) => {
+                    let previous = CONTEXT.with(|current| current.replace(context));
                     drive_registered(id);
+                    CONTEXT.with(|current| current.set(previous));
                     ran = true;
                 }
                 None => break,
@@ -134,7 +138,7 @@ impl ManualHost {
 
     fn idle(&self, rt: &LocalEventLoop) -> bool {
         let id = rt.id().expect("a hosted loop");
-        with_state(|s| !s.micro.contains(&id) && !s.macro_.contains(&id))
+        with_state(|s| !s.micro.iter().any(|(queued, _)| *queued == id) && !s.macro_.contains(&id))
     }
 }
 
@@ -197,7 +201,7 @@ fn a_wake_from_outside_a_drive_schedules_one_microtask() {
 }
 
 #[test]
-fn many_wakes_between_drives_coalesce_into_one() {
+fn repeated_notifications_of_one_waiter_need_one_drive() {
     let rt = hosted();
     let notify = Arc::new(tokio::sync::Notify::new());
     let count = Arc::new(AtomicUsize::new(0));
@@ -214,9 +218,64 @@ fn many_wakes_between_drives_coalesce_into_one() {
         notify.notify_one();
     }
     let (micro_after, _, _) = the_host().counts(&rt);
-    assert_eq!(micro_after - micro_before, 1, "a hundred wakes, one scheduled drive");
+    // Notify wakes the registered waiter once and retains one permit.
+    assert_eq!(micro_after - micro_before, 1, "one waiter was woken");
     the_host().run_until(|| count.load(Ordering::SeqCst) >= 1, Duration::from_secs(1));
     drop(rt);
+}
+
+#[test]
+fn external_wakes_keep_callbacks_in_each_host_context() {
+    let rt = hosted();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let mut senders = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        senders.push(tx);
+        let completed = completed.clone();
+        rt.spawn_local(async move {
+            rx.await.unwrap();
+            assert_eq!(CONTEXT.with(Cell::get), 2);
+            completed.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    the_host().run_until(|| the_host().idle(&rt), Duration::from_secs(1));
+    for (index, sender) in senders.into_iter().enumerate() {
+        CONTEXT.with(|context| context.set(index + 1));
+        sender.send(()).unwrap();
+    }
+    CONTEXT.with(|context| context.set(0));
+    let id = rt.id().unwrap();
+    let contexts = with_state(|s| {
+        s.micro.iter().filter(|(queued, _)| *queued == id).map(|(_, context)| *context).collect::<Vec<_>>()
+    });
+    assert_eq!(contexts, vec![1, 2], "each external context retains a callback");
+
+    // The first request ends before its callback runs. The second request
+    // must still own a callback capable of making progress.
+    with_state(|s| s.micro.retain(|(_, context)| *context != 1));
+    the_host().run_until(|| completed.load(Ordering::SeqCst) == 2, Duration::from_secs(1));
+}
+
+#[test]
+fn reentrant_host_drives_schedule_one_follow_up() {
+    the_host();
+    let rt = Builder::new_current_thread()
+        .event_interval(1)
+        .build_hosted_local_event_loop(LocalOptions::default())
+        .unwrap();
+    let id = rt.id().unwrap();
+    rt.spawn_local(async move {
+        for _ in 0..100 {
+            // Reentrant host calls fold into the drive already on the stack.
+            assert!(drive_registered(id));
+        }
+    });
+    let (micro_before, macro_before, _) = the_host().counts(&rt);
+    drive_registered(id);
+    let (micro_after, macro_after, _) = the_host().counts(&rt);
+    assert_eq!(micro_after, micro_before);
+    assert_eq!(macro_after - macro_before, 1);
 }
 
 #[test]

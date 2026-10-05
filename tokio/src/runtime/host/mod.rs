@@ -20,6 +20,8 @@
 //!   woken task runs in the same host turn that woke it. [`Turn::Macrotask`]
 //!   runs after the host has had a turn for its own I/O and timers; a busy
 //!   scheduler asks for it between batches so it never starves the host.
+//!   Each scheduled callback must retain the host context of that call,
+//!   even when a drive for the same id is already queued in another context.
 //! * [`Host::set_timer`] arms the one timer the event loop owns: the next
 //!   Tokio timer deadline. A new `set_timer` replaces the previous arm; the
 //!   loop calls [`Host::clear_timer`] first. When it fires the host calls
