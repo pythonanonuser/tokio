@@ -139,6 +139,11 @@ pub struct LinkStats {
     pub bytes_in: u64,
     /// Bytes written or sent.
     pub bytes_out: u64,
+    /// Pieces the link layer delivered: one per read or message from the
+    /// transport. `datagrams_received / chunks_in` is the batch size the
+    /// far end achieved, which sets the per-datagram cost on a host where
+    /// every piece is one event loop turn.
+    pub chunks_in: u64,
 }
 
 /// One open connection or socket.
