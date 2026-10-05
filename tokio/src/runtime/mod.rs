@@ -426,6 +426,12 @@ cfg_io_driver_impl! {
     pub(crate) mod io;
 }
 
+cfg_host_loop! {
+    pub mod host;
+    mod event_loop;
+    pub use event_loop::LocalEventLoop;
+}
+
 cfg_process_driver! {
     mod process;
 }
@@ -641,6 +647,7 @@ cfg_rt! {
         pub use metrics::{HistogramScale, HistogramConfiguration, LogHistogram, LogHistogramBuilder, InvalidHistogramConfiguration} ;
 
         cfg_net! {
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
             pub(crate) use metrics::IoDriverMetrics;
         }
     }

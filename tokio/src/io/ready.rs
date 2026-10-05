@@ -54,6 +54,7 @@ impl Ready {
     pub const ALL: Ready = Ready(READABLE | WRITABLE | READ_CLOSED | WRITE_CLOSED | ERROR);
 
     // Must remain crate-private to avoid adding a public dependency on Mio.
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     pub(crate) fn from_mio(event: &mio::event::Event) -> Ready {
         let mut ready = Ready::EMPTY;
 

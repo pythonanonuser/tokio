@@ -8,9 +8,9 @@ pub(crate) mod as_ref;
 #[cfg(feature = "rt")]
 pub(crate) mod atomic_cell;
 
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", not(all(target_os = "emscripten", not(target_feature = "atomics")))))]
 mod blocking_check;
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", not(all(target_os = "emscripten", not(target_feature = "atomics")))))]
 #[allow(unused_imports)]
 pub(crate) use blocking_check::check_socket_for_blocking;
 

@@ -149,7 +149,7 @@ macro_rules! cfg_io_blocking {
 macro_rules! cfg_io_driver {
     ($($item:item)*) => {
         $(
-            #[cfg(any(
+            #[cfg(all(not(all(target_os = "emscripten", not(target_feature = "atomics"))), any(
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
@@ -160,7 +160,7 @@ macro_rules! cfg_io_driver {
                     feature = "fs",
                     target_os = "linux"
                 )
-            ))]
+            )))]
             #[cfg_attr(docsrs, doc(cfg(any(
                 feature = "net",
                 all(unix, feature = "process"),
@@ -181,27 +181,7 @@ macro_rules! cfg_io_driver {
 macro_rules! cfg_io_driver_impl {
     ( $( $item:item )* ) => {
         $(
-            #[cfg(any(
-                feature = "net",
-                all(unix, feature = "process"),
-                all(unix, feature = "signal"),
-                all(
-                    tokio_unstable,
-                    feature = "io-uring",
-                    feature = "rt",
-                    feature = "fs",
-                    target_os = "linux"
-                )
-            ))]
-            $item
-        )*
-    }
-}
-
-macro_rules! cfg_not_io_driver {
-    ($($item:item)*) => {
-        $(
-            #[cfg(not(any(
+            #[cfg(all(not(all(target_os = "emscripten", not(target_feature = "atomics"))), any(
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
@@ -213,6 +193,26 @@ macro_rules! cfg_not_io_driver {
                     target_os = "linux"
                 )
             )))]
+            $item
+        )*
+    }
+}
+
+macro_rules! cfg_not_io_driver {
+    ($($item:item)*) => {
+        $(
+            #[cfg(not(all(not(all(target_os = "emscripten", not(target_feature = "atomics"))), any(
+                feature = "net",
+                all(unix, feature = "process"),
+                all(unix, feature = "signal"),
+                all(
+                    tokio_unstable,
+                    feature = "io-uring",
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
+            ))))]
             $item
         )*
     }
@@ -374,7 +374,7 @@ macro_rules! cfg_net_or_uring {
 macro_rules! cfg_net_unix {
     ($($item:item)*) => {
         $(
-            #[cfg(all(unix, feature = "net"))]
+            #[cfg(all(unix, not(all(target_os = "emscripten", not(target_feature = "atomics"))), feature = "net"))]
             #[cfg_attr(docsrs, doc(cfg(all(unix, feature = "net"))))]
             $item
         )*
@@ -406,6 +406,7 @@ macro_rules! cfg_process {
 macro_rules! cfg_process_driver {
     ($($item:item)*) => {
         #[cfg(unix)]
+        #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
         #[cfg(not(loom))]
         cfg_process! { $($item)* }
     }
@@ -414,7 +415,7 @@ macro_rules! cfg_process_driver {
 macro_rules! cfg_not_process_driver {
     ($($item:item)*) => {
         $(
-            #[cfg(not(all(unix, not(loom), feature = "process")))]
+            #[cfg(not(all(unix, not(all(target_os = "emscripten", not(target_feature = "atomics"))), not(loom), feature = "process")))]
             $item
         )*
     }
@@ -436,6 +437,7 @@ macro_rules! cfg_signal_internal {
     ($($item:item)*) => {
         $(
             #[cfg(any(feature = "signal", all(unix, feature = "process")))]
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
             #[cfg(not(loom))]
             $item
         )*
@@ -452,7 +454,7 @@ macro_rules! cfg_signal_internal_and_unix {
 macro_rules! cfg_not_signal_internal {
     ($($item:item)*) => {
         $(
-            #[cfg(any(loom, not(unix), not(any(feature = "signal", all(unix, feature = "process")))))]
+            #[cfg(any(loom, not(unix), all(target_os = "emscripten", not(target_feature = "atomics")), not(any(feature = "signal", all(unix, feature = "process")))))]
             $item
         )*
     }
@@ -764,6 +766,73 @@ macro_rules! cfg_not_schedule_latency {
     ($($item:item)*) => {
         $(
             #[cfg(not(feature = "schedule-latency"))]
+            $item
+        )*
+    }
+}
+
+/// The host target: `wasm32-unknown-emscripten` inside a single-threaded
+/// JavaScript isolate (Cloudflare Workers), where Tokio runs on a host-driven
+/// event loop and `tokio::net` over a link layer. See `runtime::host` and
+/// `net::host`.
+macro_rules! cfg_host_target {
+    ($($item:item)*) => {
+        $(
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            $item
+        )*
+    }
+}
+
+macro_rules! cfg_not_host_target {
+    ($($item:item)*) => {
+        $(
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+            $item
+        )*
+    }
+}
+
+/// The host-driven event loop: on the host target always, elsewhere under
+/// `--cfg tokio_host_loop` so it is tested natively.
+macro_rules! cfg_host_loop {
+    ($($item:item)*) => {
+        $(
+            #[cfg(all(tokio_unstable, feature = "rt", not(loom), any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_loop)))]
+            #[cfg_attr(docsrs, doc(cfg(all(tokio_unstable, feature = "rt"))))]
+            $item
+        )*
+    }
+}
+
+/// The link-backed `net` types: on the host target they are `tokio::net`;
+/// elsewhere, under `--cfg tokio_host_net`, they are `tokio::net::host`.
+macro_rules! cfg_host_net {
+    ($($item:item)*) => {
+        $(
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            $item
+        )*
+    }
+}
+
+/// `Interest` and `Ready`: wherever the I/O driver exists, and on the host
+/// target too, where the link-backed sockets use them.
+macro_rules! cfg_io_driver_types {
+    ($($item:item)*) => {
+        $(
+            #[cfg(any(
+                feature = "net",
+                all(unix, feature = "process"),
+                all(unix, feature = "signal"),
+                all(
+                    tokio_unstable,
+                    feature = "io-uring",
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
+            ))]
             $item
         )*
     }

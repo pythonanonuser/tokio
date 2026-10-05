@@ -24,6 +24,11 @@ use std::time::Duration;
 use std::time::Instant;
 use std::{fmt, thread};
 
+cfg_host_loop! {
+    mod host;
+    pub(crate) use host::Panicked;
+}
+
 /// Executes tasks on the current thread
 pub(crate) struct CurrentThread {
     /// Core scheduler data is acquired by a thread entering `block_on`.

@@ -166,6 +166,7 @@ cfg_net! {
         type Future = sealed::MaybeReady;
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
+            #[allow(unused_imports)]
             use crate::blocking::spawn_blocking;
             use sealed::MaybeReady;
 
@@ -176,12 +177,20 @@ cfg_net! {
                 return MaybeReady(sealed::State::Ready(Some(addr)));
             }
 
-            // Run DNS lookup on the blocking pool
             let s = self.to_owned();
 
-            MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
-                std::net::ToSocketAddrs::to_socket_addrs(&s)
-            })))
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+            {
+                // Run DNS lookup on the blocking pool
+                MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
+                    std::net::ToSocketAddrs::to_socket_addrs(&s)
+                })))
+            }
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            {
+                // The link layer resolves names: `host:port`.
+                MaybeReady(sealed::State::Resolving(resolve_host_and_port(s)))
+            }
         }
     }
 
@@ -194,6 +203,7 @@ cfg_net! {
         type Future = sealed::MaybeReady;
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
+            #[allow(unused_imports)]
             use crate::blocking::spawn_blocking;
             use sealed::MaybeReady;
 
@@ -216,9 +226,16 @@ cfg_net! {
 
             let host = host.to_owned();
 
-            MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
-                std::net::ToSocketAddrs::to_socket_addrs(&(&host[..], port))
-            })))
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+            {
+                MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
+                    std::net::ToSocketAddrs::to_socket_addrs(&(&host[..], port))
+                })))
+            }
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            {
+                MaybeReady(sealed::State::Resolving(crate::net::host::resolve(host, port)))
+            }
         }
     }
 
@@ -281,10 +298,24 @@ pub(crate) mod sealed {
         #[derive(Debug)]
         pub struct MaybeReady(pub(super) State);
 
-        #[derive(Debug)]
         pub(super) enum State {
             Ready(Option<SocketAddr>),
+            #[allow(dead_code)]
             Blocking(JoinHandle<io::Result<vec::IntoIter<SocketAddr>>>),
+            /// A lookup through the link layer (the host target).
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            Resolving(crate::net::host::ResolveFuture),
+        }
+
+        impl std::fmt::Debug for State {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    State::Ready(addr) => f.debug_tuple("Ready").field(addr).finish(),
+                    State::Blocking(_) => f.write_str("Blocking"),
+                    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+                    State::Resolving(_) => f.write_str("Resolving"),
+                }
+            }
         }
 
         #[doc(hidden)]
@@ -308,6 +339,11 @@ pub(crate) mod sealed {
 
                         Poll::Ready(res)
                     }
+                    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+                    State::Resolving(ref mut fut) => {
+                        let addrs = ready!(fut.as_mut().poll(cx))?;
+                        Poll::Ready(Ok(OneOrMore::More(addrs.into_iter())))
+                    }
                 }
             }
         }
@@ -329,5 +365,16 @@ pub(crate) mod sealed {
                 }
             }
         }
+    }
+}
+
+/// `host:port` resolved through the link layer (the host target).
+#[cfg(all(feature = "net", all(target_os = "emscripten", not(target_feature = "atomics"))))]
+fn resolve_host_and_port(s: String) -> crate::net::host::ResolveFuture {
+    match s.rsplit_once(':').and_then(|(host, port)| port.parse::<u16>().ok().map(|p| (host.to_owned(), p))) {
+        Some((host, port)) => crate::net::host::resolve(host, port),
+        None => Box::pin(async {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid socket address"))
+        }),
     }
 }

@@ -36,4 +36,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(tokio_no_tuning_tests)',
   'cfg(tokio_unstable)',
   'cfg(target_os, values("cygwin"))',
+  'cfg(tokio_host_loop)',
+  'cfg(tokio_host_net)',
 ] }

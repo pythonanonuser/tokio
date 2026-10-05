@@ -1221,7 +1221,8 @@ impl RuntimeMetrics {
         #![all(
             tokio_unstable,
             target_has_atomic = "64",
-            feature = "net"
+            feature = "net",
+            not(all(target_os = "emscripten", not(target_feature = "atomics")))
         )]
             /// Returns the number of file descriptors that have been registered with the
             /// runtime's I/O driver.

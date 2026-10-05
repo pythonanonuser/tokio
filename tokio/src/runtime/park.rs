@@ -77,6 +77,12 @@ impl ParkThread {
 
 impl Inner {
     fn park(&self) {
+        if cfg!(all(target_os = "emscripten", not(target_feature = "atomics"))) {
+            panic!(
+                "cannot park the thread on this target: a blocking wait would hang the host \
+                 event loop; drive a `LocalEventLoop` instead of calling `block_on`"
+            );
+        }
         // If we were previously notified then we consume this notification and
         // return quickly.
         if self
@@ -137,6 +143,13 @@ impl Inner {
 
         if dur == Duration::from_millis(0) {
             return;
+        }
+
+        if cfg!(all(target_os = "emscripten", not(target_feature = "atomics"))) {
+            panic!(
+                "cannot park the thread on this target: a timed wait would hang the host event \
+                 loop; the event loop arms the host's timer instead"
+            );
         }
 
         let m = self.mutex.lock();

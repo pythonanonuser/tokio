@@ -94,6 +94,14 @@ impl LocalRuntime {
             .build_local(Default::default())
     }
 
+    /// The scheduler, for the event loop that drives it in batches.
+    #[cfg(all(tokio_unstable, feature = "rt", not(loom), any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_loop)))]
+    pub(crate) fn current_thread(&self) -> &CurrentThread {
+        match &self.scheduler {
+            LocalRuntimeScheduler::CurrentThread(scheduler) => scheduler,
+        }
+    }
+
     /// Returns a handle to the runtime's spawner.
     ///
     /// The returned handle can be used to spawn tasks that run on this runtime, and can

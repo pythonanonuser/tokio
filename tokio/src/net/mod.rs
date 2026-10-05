@@ -39,15 +39,31 @@ cfg_net! {
     mod lookup_host;
     pub use lookup_host::lookup_host;
 
-    pub mod tcp;
-    pub use tcp::listener::TcpListener;
-    pub use tcp::stream::TcpStream;
-    cfg_not_wasip1! {
-        pub use tcp::socket::TcpSocket;
+    cfg_host_net! {
+        pub mod host;
+    }
 
-        mod udp;
-        #[doc(inline)]
-        pub use udp::UdpSocket;
+    cfg_not_host_target! {
+        pub mod tcp;
+        pub use tcp::listener::TcpListener;
+        pub use tcp::stream::TcpStream;
+        cfg_not_wasip1! {
+            pub use tcp::socket::TcpSocket;
+
+            mod udp;
+            #[doc(inline)]
+            pub use udp::UdpSocket;
+        }
+    }
+
+    cfg_host_target! {
+        // On the host target the link-backed types are `tokio::net`.
+        pub use host::{TcpListener, TcpSocket, TcpStream, UdpSocket};
+
+        /// TCP utility types.
+        pub mod tcp {
+            pub use super::host::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
+        }
     }
 }
 

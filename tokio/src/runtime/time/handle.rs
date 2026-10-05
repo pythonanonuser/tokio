@@ -18,6 +18,17 @@ impl Handle {
         self.inner.is_shutdown()
     }
 
+    /// The tick of the earliest pending timer, if any. Used by a host-driven
+    /// event loop to arm the host's timer; the traditional wheel only.
+    #[cfg(all(tokio_unstable, feature = "rt", not(loom), any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_loop)))]
+    pub(crate) fn next_expiration_tick(&self) -> Option<u64> {
+        match &self.inner {
+            super::Inner::Traditional { .. } => self.inner.lock().wheel.next_expiration_time(),
+            #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
+            super::Inner::Alternative { .. } => None,
+        }
+    }
+
     /// Track that the driver is being unparked
     pub(crate) fn unpark(&self) {
         #[cfg(feature = "test-util")]

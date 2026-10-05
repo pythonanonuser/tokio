@@ -6,6 +6,7 @@ use crate::runtime::blocking::schedule::BlockingSchedule;
 use crate::runtime::blocking::{shutdown, BlockingTask};
 use crate::runtime::builder::ThreadNameFn;
 use crate::runtime::task::{self, JoinHandle};
+#[cfg_attr(all(target_os = "emscripten", not(target_feature = "atomics")), allow(unused_imports))]
 use crate::runtime::{Builder, Callback, Handle, BOX_FUTURE_THRESHOLD};
 use crate::util::metric_atomics::MetricAtomicUsize;
 use crate::util::trace::{blocking_task, SpawnMeta};
@@ -301,6 +302,15 @@ impl Spawner {
         R: Send + 'static,
     {
         let fn_size = std::mem::size_of::<F>();
+        // The host target has one thread and no pool: the closure runs as an
+        // ordinary task from the next drive, which is what a single-threaded
+        // host can offer. Callers that block for long should not run there.
+        #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+        {
+            return rt.spawn_named(BlockingTask::new(func), SpawnMeta::new_unnamed(fn_size));
+        }
+        #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+        {
         let (join_handle, spawn_result) = if fn_size > BOX_FUTURE_THRESHOLD {
             self.spawn_blocking_inner(
                 Box::new(func),
@@ -324,6 +334,7 @@ impl Spawner {
             Err(SpawnError::NoThreads(e)) => {
                 panic!("OS can't spawn worker thread: {e}")
             }
+        }
         }
     }
 

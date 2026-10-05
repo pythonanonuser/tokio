@@ -374,10 +374,13 @@ impl Builder {
     /// # }
     /// ```
     pub fn enable_all(&mut self) -> &mut Self {
-        #[cfg(any(
-            feature = "net",
-            all(unix, feature = "process"),
-            all(unix, feature = "signal")
+        #[cfg(all(
+            not(all(target_os = "emscripten", not(target_feature = "atomics"))),
+            any(
+                feature = "net",
+                all(unix, feature = "process"),
+                all(unix, feature = "signal")
+            )
         ))]
         self.enable_io();
 
@@ -2087,6 +2090,56 @@ impl fmt::Debug for Builder {
             debug.finish_non_exhaustive()
         } else {
             debug.finish()
+        }
+    }
+}
+
+cfg_host_loop! {
+    impl Builder {
+        /// Creates the configured runtime as a [`LocalEventLoop`] driven by the
+        /// caller: `waker` is woken whenever the loop has work, and the caller
+        /// responds with [`LocalEventLoop::drive`], arming its own timer from
+        /// [`LocalEventLoop::next_timer`].
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime is configured with [`new_multi_thread()`].
+        ///
+        /// [`new_multi_thread()`]: Builder::new_multi_thread
+        /// [`LocalEventLoop`]: crate::runtime::LocalEventLoop
+        /// [`LocalEventLoop::drive`]: crate::runtime::LocalEventLoop::drive
+        /// [`LocalEventLoop::next_timer`]: crate::runtime::LocalEventLoop::next_timer
+        pub fn build_local_event_loop(
+            &mut self,
+            options: crate::runtime::LocalOptions,
+            waker: std::task::Waker,
+        ) -> io::Result<crate::runtime::LocalEventLoop> {
+            let runtime = self.build_local(options)?;
+            crate::runtime::LocalEventLoop::new(runtime, Some(waker))
+        }
+
+        /// Creates the configured runtime as a [`LocalEventLoop`] driven by the
+        /// installed [`Host`]: the loop schedules its own drives and timers, so
+        /// the program spawns and returns to the host.
+        ///
+        /// # Errors
+        ///
+        /// `Unsupported` when no host is installed; see
+        /// [`runtime::host::install`](crate::runtime::host::install).
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime is configured with [`new_multi_thread()`].
+        ///
+        /// [`new_multi_thread()`]: Builder::new_multi_thread
+        /// [`LocalEventLoop`]: crate::runtime::LocalEventLoop
+        /// [`Host`]: crate::runtime::host::Host
+        pub fn build_hosted_local_event_loop(
+            &mut self,
+            options: crate::runtime::LocalOptions,
+        ) -> io::Result<crate::runtime::LocalEventLoop> {
+            let runtime = self.build_local(options)?;
+            crate::runtime::LocalEventLoop::new(runtime, None)
         }
     }
 }
