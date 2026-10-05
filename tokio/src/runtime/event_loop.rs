@@ -80,8 +80,8 @@ pub(crate) struct Shared {
     /// `Some` for a hosted loop.
     host: Option<Arc<dyn Host>>,
     id: Cell<Option<EventLoopId>>,
-    /// The deadline tick the host timer is armed for, to skip no-op re-arms.
-    armed: Cell<Option<u64>>,
+    /// Whether the host's timer is armed.
+    armed: Cell<bool>,
     held: Cell<bool>,
     tid: ThreadId,
 }
@@ -140,7 +140,7 @@ impl LocalEventLoop {
             flags: flags.clone(),
             host,
             id: Cell::new(None),
-            armed: Cell::new(None),
+            armed: Cell::new(false),
             held: Cell::new(false),
             tid: std::thread::current().id(),
         });
@@ -178,6 +178,12 @@ impl LocalEventLoop {
     /// `Handle::enter`.
     pub fn handle(&self) -> &Handle {
         &self.shared.handle
+    }
+
+    /// The id a hosted loop is registered under with the [`Host`]; `None`
+    /// for the embedder-driven shape.
+    pub fn id(&self) -> Option<EventLoopId> {
+        self.shared.id.get()
     }
 
     /// Runs the driver's turn (due timers) and then one batch of ready tasks,
@@ -319,20 +325,25 @@ impl Shared {
         next_deadline(&self.handle).map(|(_, after)| after)
     }
 
+
     fn after_turn(&self, busy: bool) {
         let woken = self.flags.woken.swap(false, Ordering::AcqRel);
         match (&self.host, self.id.get()) {
             (Some(host), Some(id)) => {
-                let next = next_deadline(&self.handle);
-                let tick = next.map(|(tick, _)| tick);
-                if tick != self.armed.get() {
-                    if self.armed.get().is_some() {
-                        host.clear_timer(id);
-                    }
-                    if let Some((_, after)) = next {
+                // The host's timer is one-shot and a drive cannot tell a timer
+                // fire from a scheduled drive, so the arm is renewed after every
+                // drive while a deadline exists (`set_timer` replaces the
+                // previous arm) and cleared once none does.
+                match next_deadline(&self.handle) {
+                    Some((_, after)) => {
                         host.set_timer(id, after);
+                        self.armed.set(true);
                     }
-                    self.armed.set(tick);
+                    None => {
+                        if self.armed.replace(false) {
+                            host.clear_timer(id);
+                        }
+                    }
                 }
                 let alive = self.handle.inner.num_alive_tasks() > 0;
                 if self.held.replace(alive) != alive {
@@ -372,7 +383,7 @@ fn next_deadline(_handle: &Handle) -> Option<(u64, Duration)> {
 impl Drop for Shared {
     fn drop(&mut self) {
         if let (Some(host), Some(id)) = (&self.host, self.id.get()) {
-            if self.armed.take().is_some() {
+            if self.armed.replace(false) {
                 host.clear_timer(id);
             }
             if self.held.replace(false) {

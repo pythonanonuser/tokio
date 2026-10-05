@@ -234,15 +234,35 @@ fn the_dialer() -> &'static Arc<MemDialer> {
     })
 }
 
-fn last_link() -> Arc<MemLink> {
-    the_dialer().links.lock().unwrap().last().unwrap().clone()
+/// The link a test opened: tests run on several threads at once, so a link is
+/// found by the address or name that test alone uses.
+fn link_for(target: Target) -> Arc<MemLink> {
+    the_dialer()
+        .links
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|l| *l.kind.lock().unwrap() == Some(target.clone()))
+        .cloned()
+        .expect("the link this test opened")
+}
+
+fn udp_link_for(local: SocketAddr) -> Arc<MemLink> {
+    the_dialer()
+        .links
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|l| *l.local.lock().unwrap() == Some(local))
+        .cloned()
+        .expect("the socket this test bound")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tcp_reads_writes_and_half_closes_over_the_link() {
     the_dialer();
     let mut stream = TcpStream::connect("192.0.2.10:443".parse::<SocketAddr>().unwrap()).await.unwrap();
-    let link = last_link();
+    let link = link_for(Target::Addr("192.0.2.10:443".parse().unwrap()));
     assert_eq!(stream.peer_addr().unwrap(), "192.0.2.10:443".parse().unwrap());
 
     stream.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
@@ -273,7 +293,7 @@ async fn tcp_reads_writes_and_half_closes_over_the_link() {
 async fn tcp_split_halves_work_from_different_tasks() {
     the_dialer();
     let stream = TcpStream::connect("192.0.2.11:80".parse::<SocketAddr>().unwrap()).await.unwrap();
-    let link = last_link();
+    let link = link_for(Target::Addr("192.0.2.11:80".parse().unwrap()));
     let (mut rd, mut wr) = stream.into_split();
     let writer = tokio::spawn(async move {
         wr.write_all(b"ping").await.unwrap();
@@ -298,8 +318,8 @@ async fn tcp_split_halves_work_from_different_tasks() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_keeps_datagram_boundaries_and_sources() {
     the_dialer();
-    let socket = UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await.unwrap();
-    let link = last_link();
+    let socket = UdpSocket::bind("0.0.0.0:40001".parse::<SocketAddr>().unwrap()).await.unwrap();
+    let link = udp_link_for("0.0.0.0:40001".parse().unwrap());
     let a: SocketAddr = "203.0.113.5:40120".parse().unwrap();
     let b: SocketAddr = "203.0.113.6:40121".parse().unwrap();
 
@@ -326,8 +346,8 @@ async fn udp_keeps_datagram_boundaries_and_sources() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_readable_wakes_when_a_datagram_arrives_from_another_thread() {
     the_dialer();
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await.unwrap());
-    let link = last_link();
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:40002".parse::<SocketAddr>().unwrap()).await.unwrap());
+    let link = udp_link_for("0.0.0.0:40002".parse().unwrap());
     let s = socket.clone();
     let waiter = tokio::spawn(async move {
         s.readable().await.unwrap();
@@ -347,8 +367,8 @@ async fn udp_readable_wakes_when_a_datagram_arrives_from_another_thread() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_connect_sets_the_default_peer_and_filters_others() {
     the_dialer();
-    let socket = UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await.unwrap();
-    let link = last_link();
+    let socket = UdpSocket::bind("0.0.0.0:40003".parse::<SocketAddr>().unwrap()).await.unwrap();
+    let link = udp_link_for("0.0.0.0:40003".parse().unwrap());
     let voice: SocketAddr = "66.22.0.1:50001".parse().unwrap();
     let other: SocketAddr = "66.22.0.2:50002".parse().unwrap();
     assert_eq!(socket.send(b"x").await.unwrap_err().kind(), io::ErrorKind::NotConnected);
@@ -373,7 +393,8 @@ async fn names_resolve_through_the_dialer() {
     let addrs = resolve("127.0.0.1".into(), 9).await.unwrap();
     assert_eq!(addrs, vec!["127.0.0.1:9".parse().unwrap()]);
     let stream = TcpStream::connect_name("gateway.discord.gg", 443).await.unwrap();
-    assert_eq!(*last_link().kind.lock().unwrap(), Some(Target::Name("gateway.discord.gg".into(), 443)));
+    let link = link_for(Target::Name("gateway.discord.gg".into(), 443));
+    assert_eq!(link.peer_addr().unwrap_err().kind(), io::ErrorKind::NotConnected, "a name target has no peer address until the link layer reports one");
     drop(stream);
 }
 

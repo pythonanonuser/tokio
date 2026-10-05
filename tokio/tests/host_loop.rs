@@ -19,51 +19,58 @@ struct State {
     macro_: VecDeque<EventLoopId>,
     timers: HashMap<EventLoopId, Instant>,
     keepalive: HashMap<EventLoopId, bool>,
-    scheduled_micro: usize,
-    scheduled_macro: usize,
-    timer_sets: usize,
+    /// Per loop: microtasks scheduled, macrotasks scheduled, timers set.
+    counts: HashMap<EventLoopId, (usize, usize, usize)>,
 }
 
-/// A host loop a test steps by hand.
+/// A host loop a test steps by hand. Its state is per thread: event loops
+/// are registered per thread, and the test binary runs tests on several
+/// threads at once, so each test's drives must land on its own thread.
 #[derive(Default)]
-struct ManualHost {
-    state: Mutex<State>,
+struct ManualHost;
+
+thread_local! {
+    static STATE: Mutex<State> = Mutex::new(State::default());
+}
+
+fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with(|s| f(&mut s.lock().unwrap()))
 }
 
 impl Host for ManualHost {
     fn schedule(&self, id: EventLoopId, turn: Turn) {
-        let mut s = self.state.lock().unwrap();
-        match turn {
+        with_state(|s| match turn {
             Turn::Microtask => {
                 s.micro.push_back(id);
-                s.scheduled_micro += 1;
+                s.counts.entry(id).or_default().0 += 1;
             }
             Turn::Macrotask => {
                 s.macro_.push_back(id);
-                s.scheduled_macro += 1;
+                s.counts.entry(id).or_default().1 += 1;
             }
-        }
+        })
     }
 
     fn set_timer(&self, id: EventLoopId, after: Duration) {
-        let mut s = self.state.lock().unwrap();
-        s.timers.insert(id, Instant::now() + after);
-        s.timer_sets += 1;
+        with_state(|s| {
+            s.timers.insert(id, Instant::now() + after);
+            s.counts.entry(id).or_default().2 += 1;
+        });
     }
 
     fn clear_timer(&self, id: EventLoopId) {
-        self.state.lock().unwrap().timers.remove(&id);
+        with_state(|s| s.timers.remove(&id));
     }
 
     fn keepalive(&self, id: EventLoopId, held: bool) {
-        self.state.lock().unwrap().keepalive.insert(id, held);
+        with_state(|s| s.keepalive.insert(id, held));
     }
 }
 
 fn the_host() -> &'static Arc<ManualHost> {
     static HOST: OnceLock<Arc<ManualHost>> = OnceLock::new();
     HOST.get_or_init(|| {
-        let h = Arc::new(ManualHost::default());
+        let h = Arc::new(ManualHost);
         host::install(h.clone()).ok().expect("first install in this binary");
         h
     })
@@ -75,7 +82,7 @@ impl ManualHost {
     fn step(&self) -> bool {
         let mut ran = false;
         loop {
-            let next = self.state.lock().unwrap().micro.pop_front();
+            let next = with_state(|s| s.micro.pop_front());
             match next {
                 Some(id) => {
                     drive_registered(id);
@@ -84,20 +91,19 @@ impl ManualHost {
                 None => break,
             }
         }
-        let next = self.state.lock().unwrap().macro_.pop_front();
+        let next = with_state(|s| s.macro_.pop_front());
         if let Some(id) = next {
             drive_registered(id);
             ran = true;
         }
-        let due = {
-            let mut s = self.state.lock().unwrap();
+        let due = with_state(|s| {
             let now = Instant::now();
             let due: Vec<EventLoopId> = s.timers.iter().filter(|(_, at)| **at <= now).map(|(id, _)| *id).collect();
             for id in &due {
                 s.timers.remove(id);
             }
             due
-        };
+        });
         for id in due {
             drive_registered(id);
             ran = true;
@@ -112,7 +118,7 @@ impl ManualHost {
         while !done() {
             assert!(Instant::now() < end, "the host loop did not finish within {deadline:?}");
             if !self.step() {
-                let next = self.state.lock().unwrap().timers.values().min().copied();
+                let next = with_state(|s| s.timers.values().min().copied());
                 match next {
                     Some(at) => std::thread::sleep(at.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))),
                     None => std::thread::sleep(Duration::from_millis(1)),
@@ -121,9 +127,14 @@ impl ManualHost {
         }
     }
 
-    fn counts(&self) -> (usize, usize, usize) {
-        let s = self.state.lock().unwrap();
-        (s.scheduled_micro, s.scheduled_macro, s.timer_sets)
+    fn counts(&self, rt: &LocalEventLoop) -> (usize, usize, usize) {
+        let id = rt.id().expect("a hosted loop");
+        with_state(|s| s.counts.get(&id).copied().unwrap_or_default())
+    }
+
+    fn idle(&self, rt: &LocalEventLoop) -> bool {
+        let id = rt.id().expect("a hosted loop");
+        with_state(|s| !s.micro.contains(&id) && !s.macro_.contains(&id))
     }
 }
 
@@ -160,7 +171,7 @@ fn spawned_tasks_run_from_drives_and_timers_arm_the_host() {
     assert_eq!(*out.lock().unwrap(), vec![1, 4, 9]);
     let elapsed = started.elapsed();
     assert!(elapsed >= Duration::from_millis(30) && elapsed < Duration::from_millis(500), "{elapsed:?}");
-    let (_, _, timer_sets) = the_host().counts();
+    let (_, _, timer_sets) = the_host().counts(&rt);
     assert!(timer_sets >= 1, "the loop armed the host timer for its sleeps");
     drop(rt);
 }
@@ -175,11 +186,11 @@ fn a_wake_from_outside_a_drive_schedules_one_microtask() {
         g.store(rx.await.unwrap() as usize, Ordering::SeqCst);
     });
     // Run the spawn: the task registers on the channel and goes idle.
-    the_host().run_until(|| the_host().state.lock().unwrap().micro.is_empty(), Duration::from_secs(1));
-    let (micro_before, _, _) = the_host().counts();
+    the_host().run_until(|| the_host().idle(&rt), Duration::from_secs(1));
+    let (micro_before, _, _) = the_host().counts(&rt);
     // The send comes from outside any drive (this thread, no runtime entered).
     tx.send(7).unwrap();
-    let (micro_after, _, _) = the_host().counts();
+    let (micro_after, _, _) = the_host().counts(&rt);
     assert_eq!(micro_after - micro_before, 1, "exactly one microtask drive for the wake");
     the_host().run_until(|| got.load(Ordering::SeqCst) == 7, Duration::from_secs(1));
     drop(rt);
@@ -197,12 +208,12 @@ fn many_wakes_between_drives_coalesce_into_one() {
             c.fetch_add(1, Ordering::SeqCst);
         }
     });
-    the_host().run_until(|| the_host().state.lock().unwrap().micro.is_empty(), Duration::from_secs(1));
-    let (micro_before, _, _) = the_host().counts();
+    the_host().run_until(|| the_host().idle(&rt), Duration::from_secs(1));
+    let (micro_before, _, _) = the_host().counts(&rt);
     for _ in 0..100 {
         notify.notify_one();
     }
-    let (micro_after, _, _) = the_host().counts();
+    let (micro_after, _, _) = the_host().counts(&rt);
     assert_eq!(micro_after - micro_before, 1, "a hundred wakes, one scheduled drive");
     the_host().run_until(|| count.load(Ordering::SeqCst) >= 1, Duration::from_secs(1));
     drop(rt);
@@ -226,9 +237,9 @@ fn a_busy_loop_yields_a_macrotask_between_batches() {
         }
         d.store(1, Ordering::SeqCst);
     });
-    let (_, macro_before, _) = the_host().counts();
+    let (_, macro_before, _) = the_host().counts(&rt);
     the_host().run_until(|| done.load(Ordering::SeqCst) == 1, Duration::from_secs(5));
-    let (_, macro_after, _) = the_host().counts();
+    let (_, macro_after, _) = the_host().counts(&rt);
     assert!(macro_after - macro_before >= 10, "batches of four yields handed the host turns: {}", macro_after - macro_before);
     drop(rt);
 }
@@ -254,12 +265,12 @@ fn keepalive_follows_live_tasks() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         d.store(1, Ordering::SeqCst);
     });
-    the_host().run_until(|| the_host().state.lock().unwrap().micro.is_empty(), Duration::from_secs(1));
-    let id = *the_host().state.lock().unwrap().keepalive.keys().last().unwrap();
-    assert_eq!(the_host().state.lock().unwrap().keepalive[&id], true, "held while a task sleeps");
+    the_host().run_until(|| the_host().idle(&rt), Duration::from_secs(1));
+    let id = rt.id().unwrap();
+    assert_eq!(with_state(|s| s.keepalive[&id]), true, "held while a task sleeps");
     the_host().run_until(|| done.load(Ordering::SeqCst) == 1, Duration::from_secs(2));
     // The completing drive released the hold.
-    the_host().run_until(|| the_host().state.lock().unwrap().keepalive[&id] == false, Duration::from_secs(1));
+    the_host().run_until(|| !with_state(|s| s.keepalive[&id]), Duration::from_secs(1));
     drop(rt);
 }
 
