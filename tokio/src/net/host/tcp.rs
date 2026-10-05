@@ -65,6 +65,14 @@ impl TcpStream {
         self.link.take_error()
     }
 
+    pub fn from_std(_stream: std::net::TcpStream) -> io::Result<TcpStream> {
+        Err(unsupported("a standard socket cannot be adopted on a link layer"))
+    }
+
+    pub fn into_std(self) -> io::Result<std::net::TcpStream> {
+        Err(unsupported("a link-backed stream has no standard socket"))
+    }
+
     pub fn poll_peek(&self, _cx: &mut Context<'_>, _buf: &mut ReadBuf<'_>) -> Poll<io::Result<usize>> {
         Poll::Ready(Err(unsupported("peek is not available on a link-backed stream")))
     }
@@ -526,6 +534,14 @@ impl TcpSocket {
         TcpStream::connect_target(Target::Addr(addr), self.options).await
     }
 
+    /// Accepts and drops a standard socket. Code that prepares a socket with
+    /// `socket2` and hands it over (hyper-util's connector) then calls
+    /// `connect`, which dials through the link layer; the standard socket's
+    /// options are not carried.
+    pub fn from_std_stream(_std_stream: std::net::TcpStream) -> TcpSocket {
+        TcpSocket::default()
+    }
+
     pub fn listen(self, _backlog: u32) -> io::Result<TcpListener> {
         Err(unsupported("listening is not available on a link layer"))
     }
@@ -546,6 +562,10 @@ impl TcpListener {
     }
 
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        Err(unsupported("listening is not available on a link layer"))
+    }
+
+    pub fn from_std(_listener: std::net::TcpListener) -> io::Result<TcpListener> {
         Err(unsupported("listening is not available on a link layer"))
     }
 

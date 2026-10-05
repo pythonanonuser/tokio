@@ -52,9 +52,13 @@ use crate::io::ReadBuf;
 
 mod tcp;
 mod udp;
+#[cfg(unix)]
+mod unix;
 
 pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, TcpListener, TcpSocket, TcpStream, WriteHalf};
 pub use udp::UdpSocket;
+#[cfg(unix)]
+pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 /// A future the dialer returns. `Send`, so a connecting task may be spawned.
 pub type DialFuture = Pin<Box<dyn Future<Output = io::Result<Arc<dyn Link>>> + Send + 'static>>;

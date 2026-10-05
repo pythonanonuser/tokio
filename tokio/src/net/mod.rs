@@ -59,6 +59,8 @@ cfg_net! {
     cfg_host_target! {
         // On the host target the link-backed types are `tokio::net`.
         pub use host::{TcpListener, TcpSocket, TcpStream, UdpSocket};
+        #[cfg(unix)]
+        pub use host::{UnixDatagram, UnixListener, UnixStream};
 
         /// TCP utility types.
         pub mod tcp {

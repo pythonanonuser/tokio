@@ -59,6 +59,14 @@ impl UdpSocket {
         }
     }
 
+    pub fn from_std(_socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
+        Err(unsupported("a standard socket cannot be adopted on a link layer"))
+    }
+
+    pub fn into_std(self) -> io::Result<std::net::UdpSocket> {
+        Err(unsupported("a link-backed socket has no standard socket"))
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.link.local_addr()
     }
