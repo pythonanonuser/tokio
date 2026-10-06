@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
-use tokio::runtime::host::{self, drive_registered, EventLoopId, Host, Turn};
+use tokio::runtime::host::{self, drive_registered, drive_timer_registered, EventLoopId, Host, Turn};
 use tokio::runtime::{Builder, LocalEventLoop, LocalOptions};
 
 #[derive(Default)]
@@ -105,10 +105,19 @@ impl ManualHost {
             due
         });
         for id in due {
-            drive_registered(id);
+            drive_timer_registered(id);
             ran = true;
         }
         ran
+    }
+
+    /// Fires the loop's timer now, before it is due, as a host that rounds
+    /// delays to whole milliseconds can.
+    fn fire_timer_early(&self, rt: &LocalEventLoop) {
+        let id = rt.id().expect("a hosted loop");
+        let armed = with_state(|s| s.timers.remove(&id).is_some());
+        assert!(armed, "the host timer is armed");
+        drive_timer_registered(id);
     }
 
     /// Steps until `done()` or the deadline, sleeping until the next timer
@@ -305,4 +314,58 @@ fn the_embedder_driven_shape_reports_wakes_and_the_next_timer() {
     rt.drive();
     assert_eq!(done.load(Ordering::SeqCst), 1);
     assert!(rt.next_timer().is_none());
+}
+
+#[test]
+fn drives_that_leave_the_deadline_in_place_do_not_arm_the_timer_again() {
+    let host = the_host();
+    let rt = hosted();
+    let done = Arc::new(AtomicUsize::new(0));
+    // One sleep sets the deadline; a channel then wakes the loop many times
+    // before it is due.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+    let d = done.clone();
+    rt.spawn_local(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        d.fetch_add(1, Ordering::SeqCst);
+    });
+    let d = done.clone();
+    rt.spawn_local(async move {
+        let mut n = 0;
+        while let Some(_) = rx.recv().await {
+            n += 1;
+            if n == 50 {
+                break;
+            }
+        }
+        d.fetch_add(1, Ordering::SeqCst);
+    });
+    for _ in 0..50 {
+        tx.send(1).unwrap();
+        host.run_until(|| host.idle(&rt), Duration::from_secs(2));
+    }
+    let (_, _, timers_before_sleep_fires) = host.counts(&rt);
+    assert_eq!(timers_before_sleep_fires, 1, "fifty wakes with the same deadline pending arm the host once");
+    host.run_until(|| done.load(Ordering::SeqCst) == 2, Duration::from_secs(5));
+}
+
+#[test]
+fn a_timer_the_host_fired_early_is_armed_again() {
+    let host = the_host();
+    let rt = hosted();
+    let done = Arc::new(AtomicUsize::new(0));
+    let d = done.clone();
+    rt.spawn_local(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        d.fetch_add(1, Ordering::SeqCst);
+    });
+    host.run_until(|| host.idle(&rt), Duration::from_secs(2));
+    let (_, _, armed_once) = host.counts(&rt);
+    assert_eq!(armed_once, 1);
+    // The host fires its timer long before the deadline: the drive finds the
+    // sleep still pending and must arm the host again, or the sleep never ends.
+    host.fire_timer_early(&rt);
+    let (_, _, armed_twice) = host.counts(&rt);
+    assert_eq!(armed_twice, 2, "an early fire re-arms");
+    host.run_until(|| done.load(Ordering::SeqCst) == 1, Duration::from_secs(5));
 }

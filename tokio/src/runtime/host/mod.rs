@@ -23,7 +23,8 @@
 //! * [`Host::set_timer`] arms the one timer the event loop owns: the next
 //!   Tokio timer deadline. A new `set_timer` replaces the previous arm; the
 //!   loop calls [`Host::clear_timer`] first. When it fires the host calls
-//!   [`drive_registered`].
+//!   [`drive_timer_registered`], so the loop knows the one-shot arm is spent;
+//!   a drive that leaves the same deadline pending does not arm again.
 //! * A spurious [`drive_registered`] is harmless. A drive that finds nothing
 //!   to do returns at once.
 //! * [`Host::keepalive`] tells a host that exits when idle (Node) whether the
@@ -120,6 +121,19 @@ pub fn drive_registered(id: EventLoopId) -> bool {
     match lookup(id) {
         Some(shared) => {
             shared.drive_from_host();
+            true
+        }
+        None => false,
+    }
+}
+
+/// The host's timer callback: the timer armed by [`Host::set_timer`] fired,
+/// drive the event loop `id`. Like [`drive_registered`], but the loop also
+/// learns that its arm is spent and must arm again if a deadline remains.
+pub fn drive_timer_registered(id: EventLoopId) -> bool {
+    match lookup(id) {
+        Some(shared) => {
+            shared.drive_from_host_timer();
             true
         }
         None => false,
