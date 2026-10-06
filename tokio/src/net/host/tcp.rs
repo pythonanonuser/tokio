@@ -20,10 +20,9 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    /// Connects through the installed dialer. A name is handed to the dialer
-    /// as a name, so a link layer that resolves at connect time (the Workers
-    /// `connect()` API) needs no lookup round trip; an address is used as
-    /// is.
+    /// Resolves `addr` through [`ToSocketAddrs`] and tries each address
+    /// through the selected dialer. Use [`Self::connect_name`] to pass a
+    /// name directly to the dialer for resolution at connect time.
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
         let addrs = crate::net::to_socket_addrs(addr).await?;
         let mut last_err = None;

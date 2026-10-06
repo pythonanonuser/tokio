@@ -21,7 +21,14 @@
 //! Wakes coalesce. A wake that arrives while a drive is running sets a flag
 //! and the drive schedules one follow-up at its end. A wake that arrives
 //! between drives schedules one drive; further wakes before it runs are
-//! absorbed. The follow-up after a batch that still has ready work is a
+//! absorbed. This is correct because one hosted loop belongs to one owner
+//! whose callbacks share a lifetime: in a Cloudflare Durable Object every
+//! callback the actor schedules lives until the actor shuts down, whichever
+//! request scheduled it (workerd `io-context.c++`, the actor branch of the
+//! drain), so a drive queued from one callback serves wakes from any other.
+//! A host that cancels callbacks per request (a plain Worker request) must
+//! give each request its own loop, as the `worker` crate's isolated mode
+//! does. The follow-up after a batch that still has ready work is a
 //! macrotask, so a busy loop yields a host turn between batches instead of
 //! starving the host's I/O.
 //!
@@ -86,6 +93,8 @@ pub(crate) struct Shared {
     timer_fired: Cell<bool>,
     held: Cell<bool>,
     tid: ThreadId,
+    #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+    network_dialer: std::cell::RefCell<Option<Arc<dyn crate::net::host::Dialer>>>,
 }
 
 impl std::fmt::Debug for dyn Host {
@@ -113,7 +122,9 @@ impl Wake for Hosted {
             return;
         }
         if self.flags.pending.swap(true, Ordering::AcqRel) {
-            // A microtask drive is already on its way.
+            // A microtask drive is already on its way. It belongs to the same
+            // owner as this wake (one loop, one actor), so it serves this wake
+            // too; see the module doc for why that holds on workerd.
             return;
         }
         self.host.schedule(self.id, Turn::Microtask);
@@ -146,6 +157,8 @@ impl LocalEventLoop {
             timer_fired: Cell::new(false),
             held: Cell::new(false),
             tid: std::thread::current().id(),
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            network_dialer: std::cell::RefCell::new(None),
         });
         let waker = match waker {
             Some(waker) => waker,
@@ -181,6 +194,22 @@ impl LocalEventLoop {
     /// `Handle::enter`.
     pub fn handle(&self) -> &Handle {
         &self.shared.handle
+    }
+
+    cfg_host_net! {
+        /// Sets the network dialer used while this loop polls futures.
+        ///
+        /// Applies to `block_on` and every task polled by `drive`, including
+        /// tasks spawned with [`tokio::spawn`](crate::spawn). Existing sockets
+        /// retain their links. A change takes effect on the next drive or
+        /// `block_on` call. Entering the runtime with [`Handle::enter`] alone
+        /// does not select this dialer.
+        ///
+        /// Until this is called, networking uses the process default installed
+        /// with [`crate::net::host::install`].
+        pub fn set_network_dialer(&self, dialer: Arc<dyn crate::net::host::Dialer>) {
+            *self.shared.network_dialer.borrow_mut() = Some(dialer);
+        }
     }
 
     /// The id a hosted loop is registered under with the [`Host`]; `None`
@@ -296,6 +325,8 @@ impl Shared {
         };
         let scheduler = self.handle.inner.as_current_thread();
         let batch = context::enter_runtime(&self.handle.inner, false, |_| {
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            let _dialer = crate::net::host::enter_dialer(self.network_dialer.borrow().clone());
             self.runtime.current_thread().drive_batch(scheduler)
         });
         drop(guard);
@@ -316,6 +347,8 @@ impl Shared {
         };
         let scheduler = self.handle.inner.as_current_thread();
         let ret = context::enter_runtime(&self.handle.inner, false, |_| {
+            #[cfg(all(feature = "net", any(all(target_os = "emscripten", not(target_feature = "atomics")), tokio_host_net)))]
+            let _dialer = crate::net::host::enter_dialer(self.network_dialer.borrow().clone());
             self.runtime.current_thread().block_on_ready(scheduler, future)
         });
         drop(guard);

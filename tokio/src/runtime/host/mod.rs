@@ -20,6 +20,11 @@
 //!   woken task runs in the same host turn that woke it. [`Turn::Macrotask`]
 //!   runs after the host has had a turn for its own I/O and timers; a busy
 //!   scheduler asks for it between batches so it never starves the host.
+//!   One loop has one owner, and the host must keep every callback the loop
+//!   schedules alive for that owner's whole lifetime (a Durable Object's
+//!   actor), because wakes that arrive while a drive is queued fold into it.
+//!   A host that cancels callbacks per request gives each request its own
+//!   loop instead.
 //! * [`Host::set_timer`] arms the one timer the event loop owns: the next
 //!   Tokio timer deadline. A new `set_timer` replaces the previous arm; the
 //!   loop calls [`Host::clear_timer`] first. When it fires the host calls

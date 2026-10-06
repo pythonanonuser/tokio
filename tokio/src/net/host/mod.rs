@@ -6,13 +6,16 @@
 //! callbacks, and (on Cloudflare Workers) a TCP link from a Durable Object
 //! to its container. The types in this module are the ordinary
 //! [`TcpStream`], [`TcpSocket`], [`UdpSocket`] and [`lookup_host`] API,
-//! implemented over two traits the embedding installs once:
+//! implemented over two traits supplied by the embedding:
 //!
 //! * a [`Dialer`], which opens links: a TCP connection to a host and port, a
 //!   bound UDP socket, or a name lookup;
 //! * a [`Link`], one open connection or socket, polled for bytes or
 //!   datagrams with readiness-style `poll_*` methods that register the
 //!   caller's [`Waker`](std::task::Waker).
+//!
+//! [`install`] supplies the process default dialer. A hosted runtime can
+//! select its own with `LocalEventLoop::set_network_dialer`.
 //!
 //! The traits carry `Send + Sync` bounds and return `Send` futures, so the
 //! socket types are `Send + Sync` the way the native ones are, and a task
@@ -40,6 +43,7 @@
 //! same code is tested on the multi-thread runtime against an in-memory
 //! dialer.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -191,21 +195,55 @@ pub trait Dialer: Send + Sync + 'static {
     fn resolve(&self, host: String, port: u16) -> ResolveFuture;
 }
 
+impl std::fmt::Debug for dyn Dialer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Dialer")
+    }
+}
+
 static DIALER: OnceLock<Arc<dyn Dialer>> = OnceLock::new();
 
-/// Installs the process's dialer. The first installation wins; the dialer is
-/// handed back if one is installed already.
+thread_local! {
+    static CURRENT_DIALER: RefCell<Option<Arc<dyn Dialer>>> = const { RefCell::new(None) };
+}
+
+cfg_host_loop! {
+    pub(crate) struct DialerGuard {
+        previous: Option<Arc<dyn Dialer>>,
+        _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+
+    pub(crate) fn enter_dialer(dialer: Option<Arc<dyn Dialer>>) -> DialerGuard {
+        DialerGuard {
+            previous: CURRENT_DIALER.with(|current| current.replace(dialer)),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    impl Drop for DialerGuard {
+        fn drop(&mut self) {
+            CURRENT_DIALER.with(|current| current.replace(self.previous.take()));
+        }
+    }
+}
+
+/// Installs the process's default dialer. A `LocalEventLoop` may select its
+/// own with `set_network_dialer`. The first installation wins, and the
+/// dialer is handed back if one is installed already.
 pub fn install(dialer: Arc<dyn Dialer>) -> Result<(), Arc<dyn Dialer>> {
     DIALER.set(dialer)
 }
 
 pub(crate) fn dialer() -> io::Result<Arc<dyn Dialer>> {
-    DIALER.get().cloned().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no network dialer is installed; call tokio::net::host::install first",
-        )
-    })
+    CURRENT_DIALER
+        .with(|current| current.borrow().clone())
+        .or_else(|| DIALER.get().cloned())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no network dialer is installed; call LocalEventLoop::set_network_dialer or tokio::net::host::install first",
+            )
+        })
 }
 
 /// Resolves `host` to addresses carrying `port` through the installed
