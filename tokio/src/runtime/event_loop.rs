@@ -406,7 +406,10 @@ impl Shared {
                 if busy || woken {
                     // A follow-up, as a macrotask: a microtask here would run
                     // before the host's own I/O and timers and a self-waking
-                    // task could starve them.
+                    // task could starve them. It is a pending drive like any
+                    // other, so a wake before it runs folds into it instead
+                    // of scheduling a second drive.
+                    self.flags.pending.store(true, Ordering::Release);
                     host.schedule(id, Turn::Macrotask);
                 }
             }

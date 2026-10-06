@@ -111,7 +111,7 @@ pub struct UdpOptions {
 /// A socket option set after the link is open. The link may answer
 /// `Unsupported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Option_ {
+pub enum SocketOption {
     /// `TCP_NODELAY`.
     Nodelay(bool),
     /// `SO_BROADCAST`.
@@ -182,7 +182,7 @@ pub trait Link: Send + Sync + 'static {
 
     fn local_addr(&self) -> io::Result<SocketAddr>;
     fn peer_addr(&self) -> io::Result<SocketAddr>;
-    fn set_option(&self, option: Option_) -> io::Result<()>;
+    fn set_option(&self, option: SocketOption) -> io::Result<()>;
     /// The last asynchronous error, if the link stores one.
     fn take_error(&self) -> io::Result<Option<io::Error>>;
     fn stats(&self) -> LinkStats;

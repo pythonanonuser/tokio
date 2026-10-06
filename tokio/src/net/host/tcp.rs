@@ -1,7 +1,7 @@
 //! TCP over a [`Link`]: the stream, the pre-connect socket, the split
 //! halves, and a listener that reports what the platform lacks.
 
-use super::{dialer, unsupported, Link, LinkStats, Option_, Target, TcpOptions};
+use super::{dialer, unsupported, Link, LinkStats, SocketOption, Target, TcpOptions};
 use crate::io::{AsyncRead, AsyncWrite, Interest, ReadBuf, Ready};
 use crate::net::ToSocketAddrs;
 
@@ -20,10 +20,14 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    /// Resolves `addr` through [`ToSocketAddrs`] and tries each address
-    /// through the selected dialer. Use [`Self::connect_name`] to pass a
-    /// name directly to the dialer for resolution at connect time.
+    /// Connects through the selected dialer. A name (`"host:port"`,
+    /// `(&str, u16)`, `(String, u16)`) goes to the dialer as a name, one
+    /// link, resolved where the dialer connects; an address form is dialed
+    /// as given, each address in turn.
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
+        if let Some((host, port)) = addr.host_name() {
+            return Self::connect_target(Target::Name(host, port), TcpOptions::default()).await;
+        }
         let addrs = crate::net::to_socket_addrs(addr).await?;
         let mut last_err = None;
         for addr in addrs {
@@ -179,7 +183,7 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        self.link.set_option(Option_::Nodelay(nodelay))
+        self.link.set_option(SocketOption::Nodelay(nodelay))
     }
 
     pub fn linger(&self) -> io::Result<Option<Duration>> {
@@ -187,7 +191,7 @@ impl TcpStream {
     }
 
     pub fn set_linger(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.link.set_option(Option_::Linger(dur))
+        self.link.set_option(SocketOption::Linger(dur))
     }
 
     pub fn ttl(&self) -> io::Result<u32> {
@@ -195,7 +199,7 @@ impl TcpStream {
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
-        self.link.set_option(Option_::Ttl(ttl))
+        self.link.set_option(SocketOption::Ttl(ttl))
     }
 
     /// Link counters.
@@ -586,8 +590,5 @@ impl TcpListener {
 }
 
 fn noop_waker() -> std::task::Waker {
-    use std::task::{RawWaker, RawWakerVTable, Waker};
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
-    // SAFETY: the vtable functions touch no data.
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    std::task::Waker::noop().clone()
 }

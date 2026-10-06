@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::host::{
-    install, resolve, DialFuture, Dialer, Link, LinkStats, Option_, ResolveFuture, Target, TcpOptions, TcpStream, UdpOptions, UdpSocket,
+    install, resolve, DialFuture, Dialer, Link, LinkStats, SocketOption, ResolveFuture, Target, TcpOptions, TcpStream, UdpOptions, UdpSocket,
 };
 
 #[derive(Default)]
@@ -38,7 +38,7 @@ struct MemLink {
     outbound: Mutex<Vec<(Option<SocketAddr>, Vec<u8>)>>,
     peer: Mutex<Option<SocketAddr>>,
     local: Mutex<Option<SocketAddr>>,
-    options: Mutex<Vec<Option_>>,
+    options: Mutex<Vec<SocketOption>>,
     shut: Mutex<bool>,
 }
 
@@ -181,7 +181,7 @@ impl Link for MemLink {
     fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.peer.lock().unwrap().ok_or_else(|| io::ErrorKind::NotConnected.into())
     }
-    fn set_option(&self, option: Option_) -> io::Result<()> {
+    fn set_option(&self, option: SocketOption) -> io::Result<()> {
         self.options.lock().unwrap().push(option);
         Ok(())
     }
@@ -314,7 +314,7 @@ async fn tcp_split_halves_work_from_different_tasks() {
     assert_eq!(link.written(), b"ping");
     let stream = rd.reunite(wr).unwrap();
     stream.set_nodelay(true).unwrap();
-    assert_eq!(link.options.lock().unwrap().as_slice(), &[Option_::Nodelay(true)]);
+    assert_eq!(link.options.lock().unwrap().as_slice(), &[SocketOption::Nodelay(true)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

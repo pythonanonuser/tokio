@@ -1,6 +1,6 @@
 //! A UDP socket over a [`Link`].
 
-use super::{dialer, unsupported, Link, LinkStats, Option_, UdpOptions};
+use super::{dialer, unsupported, Link, LinkStats, SocketOption, UdpOptions};
 use crate::io::{Interest, ReadBuf, Ready};
 use crate::net::ToSocketAddrs;
 
@@ -8,7 +8,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// A UDP socket whose datagrams travel over a [`Link`] the installed
@@ -17,7 +17,6 @@ use std::task::{Context, Poll};
 /// (`peek*`, device binding, multicast groups) return `Unsupported`.
 pub struct UdpSocket {
     link: Arc<dyn Link>,
-    peer: Mutex<Option<SocketAddr>>,
 }
 
 impl UdpSocket {
@@ -45,18 +44,12 @@ impl UdpSocket {
 
     async fn bind_addr(local: SocketAddr, options: UdpOptions) -> io::Result<UdpSocket> {
         let link = dialer()?.bind_udp(local, options).await?;
-        Ok(UdpSocket {
-            link,
-            peer: Mutex::new(None),
-        })
+        Ok(UdpSocket { link })
     }
 
     /// Wraps an already open link.
     pub fn from_link(link: Arc<dyn Link>) -> UdpSocket {
-        UdpSocket {
-            link,
-            peer: Mutex::new(None),
-        }
+        UdpSocket { link }
     }
 
     pub fn from_std(_socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
@@ -72,10 +65,7 @@ impl UdpSocket {
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.peer
-            .lock()
-            .unwrap()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "socket is not connected"))
+        self.link.peer_addr()
     }
 
     /// Sets the default destination and filters incoming datagrams to it.
@@ -84,9 +74,7 @@ impl UdpSocket {
         let peer = addrs
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address"))?;
-        self.link.connect_peer(peer)?;
-        *self.peer.lock().unwrap() = Some(peer);
-        Ok(())
+        self.link.connect_peer(peer)
     }
 
     pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
@@ -252,7 +240,7 @@ impl UdpSocket {
     }
 
     pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
-        self.link.set_option(Option_::Broadcast(on))
+        self.link.set_option(SocketOption::Broadcast(on))
     }
 
     pub fn multicast_loop_v4(&self) -> io::Result<bool> {
@@ -260,7 +248,7 @@ impl UdpSocket {
     }
 
     pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
-        self.link.set_option(Option_::MulticastLoopV4(on))
+        self.link.set_option(SocketOption::MulticastLoopV4(on))
     }
 
     pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
@@ -268,7 +256,7 @@ impl UdpSocket {
     }
 
     pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
-        self.link.set_option(Option_::MulticastTtlV4(ttl))
+        self.link.set_option(SocketOption::MulticastTtlV4(ttl))
     }
 
     pub fn multicast_loop_v6(&self) -> io::Result<bool> {
@@ -276,7 +264,7 @@ impl UdpSocket {
     }
 
     pub fn set_multicast_loop_v6(&self, on: bool) -> io::Result<()> {
-        self.link.set_option(Option_::MulticastLoopV6(on))
+        self.link.set_option(SocketOption::MulticastLoopV6(on))
     }
 
     pub fn ttl(&self) -> io::Result<u32> {
@@ -284,7 +272,7 @@ impl UdpSocket {
     }
 
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
-        self.link.set_option(Option_::Ttl(ttl))
+        self.link.set_option(SocketOption::Ttl(ttl))
     }
 
     pub fn tos(&self) -> io::Result<u32> {
@@ -292,7 +280,7 @@ impl UdpSocket {
     }
 
     pub fn set_tos(&self, tos: u32) -> io::Result<()> {
-        self.link.set_option(Option_::Tos(tos))
+        self.link.set_option(SocketOption::Tos(tos))
     }
 
     pub fn join_multicast_v4(&self, _multiaddr: Ipv4Addr, _interface: Ipv4Addr) -> io::Result<()> {
@@ -325,7 +313,7 @@ impl fmt::Debug for UdpSocket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UdpSocket")
             .field("local", &self.link.local_addr().ok())
-            .field("peer", &*self.peer.lock().unwrap())
+            .field("peer", &self.link.peer_addr().ok())
             .finish()
     }
 }

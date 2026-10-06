@@ -165,6 +165,14 @@ cfg_net! {
         type Iter = sealed::OneOrMore;
         type Future = sealed::MaybeReady;
 
+        fn host_name(&self) -> Option<(String, u16)> {
+            if self.parse::<SocketAddr>().is_ok() {
+                return None;
+            }
+            let (host, port) = self.rsplit_once(':')?;
+            Some((host.to_owned(), port.parse().ok()?))
+        }
+
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
             #[allow(unused_imports)]
             use crate::blocking::spawn_blocking;
@@ -201,6 +209,14 @@ cfg_net! {
     impl sealed::ToSocketAddrsPriv for (&str, u16) {
         type Iter = sealed::OneOrMore;
         type Future = sealed::MaybeReady;
+
+        fn host_name(&self) -> Option<(String, u16)> {
+            let (host, port) = *self;
+            if host.parse::<IpAddr>().is_ok() {
+                return None;
+            }
+            Some((host.to_owned(), port))
+        }
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
             #[allow(unused_imports)]
@@ -250,6 +266,10 @@ cfg_net! {
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
             (self.0.as_str(), self.1).to_socket_addrs(sealed::Internal)
         }
+
+        fn host_name(&self) -> Option<(String, u16)> {
+            (self.0.as_str(), self.1).host_name()
+        }
     }
 
     // ===== impl String =====
@@ -262,6 +282,10 @@ cfg_net! {
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
             self[..].to_socket_addrs(sealed::Internal)
+        }
+
+        fn host_name(&self) -> Option<(String, u16)> {
+            self[..].host_name()
         }
     }
 }
@@ -281,6 +305,14 @@ pub(crate) mod sealed {
         type Future: Future<Output = io::Result<Self::Iter>> + Send + 'static;
 
         fn to_socket_addrs(&self, internal: Internal) -> Self::Future;
+
+        /// The host name and port this value carries, when it is a name and
+        /// not an address. A link layer that resolves at connect time takes
+        /// the name directly and saves the separate lookup. `None` for every
+        /// address form and for a name that parses as an address.
+        fn host_name(&self) -> Option<(String, u16)> {
+            None
+        }
     }
 
     #[allow(missing_debug_implementations)]
